@@ -1,0 +1,295 @@
+---
+title: "TT Amusement Parks"
+author: "Oli Preston"
+date: "12/09/2019"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+options(scipen=10000)
+set.seed(101)
+
+```
+
+
+```{r load}
+
+library(tidyverse)
+library(lubridate)
+library(prophet)
+library(scales)
+
+theme_set(theme_classic())
+
+tx_injuries <- readr::read_csv("https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2019/2019-09-10/tx_injuries.csv")
+
+safer_parks <- readr::read_csv("https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2019/2019-09-10/saferparks.csv")
+
+safer_parks <- 
+  safer_parks %>% 
+  as_tibble() %>% 
+  mutate(acc_date = mdy(acc_date))
+
+```
+
+
+```{r explore}
+# Explore data a bit
+safer_parks %>% summary()
+
+safer_parks %>% 
+  count(source, sort = TRUE)
+
+safer_parks %>% 
+  count(device_type, sort = TRUE) 
+
+safer_parks %>% 
+  count(acc_state, sort = TRUE)
+  
+```
+
+
+```{r}
+
+# Tidy dataset for injuries. One row per person injured. 
+injuries_tidy <- 
+  safer_parks %>% 
+  select(id = acc_id,
+         date = acc_date,
+         state = acc_state,
+         type = bus_type,
+         sector = industry_sector,
+         category = device_category,
+         num_injured) %>% 
+  drop_na() %>% 
+  uncount(num_injured) %>% 
+  filter(year(date) > 2012)
+
+count(injuries_tidy, state, sort = TRUE)
+# Lots of injuries in California. Bigger population? More parks? 
+
+```
+
+
+```{r plot_CA}
+
+# Plot weekly injuries, by state
+injuries_tidy %>% 
+  group_by(state, week = cut(date, "week")) %>% 
+  summarise(injuries = n()) %>% 
+  mutate(week = as_date(week)) %>% 
+  ggplot(aes(week, injuries)) +
+  geom_line() +
+  facet_wrap(~state)
+
+# CA, FL, PA, NJ, OK, and TX represent majority of the data =
+# Explore seasonality of injuries in CA specifically
+
+injuries_CA <- 
+  injuries_tidy %>% 
+  filter(state == "CA")
+
+
+injuries_CA %>% 
+  group_by(week = cut(date, "week")) %>% 
+  summarise(injuries = n()) %>% 
+  mutate(week = as_date(week)) %>% 
+  ggplot(aes(week, injuries)) +
+  geom_line() +
+  geom_smooth() +
+  labs(title = "Weekly injuries in Californian parks, 2012-2017",
+       x = "",
+       y = "Total injuries")
+
+# Injuries in CA by day of the week
+injuries_CA %>% 
+  mutate(day = wday(date, label = TRUE)) %>%
+  group_by(day) %>% 
+  summarise(n = n()) %>% 
+  ggplot(aes(day, n)) +
+  geom_col()
+  
+# More injuries over weekend outside of summer holidays?  
+injuries_CA %>% 
+  mutate(day = wday(date, label = TRUE),
+         week = cut(date, "week") %>% as_date(),
+         is_weekend = day %in% c("Sat", "Sun")) %>% 
+  group_by(week, is_weekend) %>% 
+  summarise(injuries = n()) %>% 
+  ggplot(aes(week, injuries, colour = is_weekend)) +
+  geom_line()
+
+# Spikes in weekday injuries look like they might be in the summer holidays, but similar for the rest of the year
+  
+```
+
+
+```{r prophet_1}
+# Prophet forecast model - can we accurately forecast the number of injuries in a given week at parks in CA?
+weekly_injuries_CA <-
+  injuries_CA %>% 
+  group_by(week = cut(date, "week")) %>% 
+  summarise(injuries = n()) %>% 
+  mutate(week = as_date(week)) %>% 
+  filter(year(week) > 2012,
+         year(week) < 2017)
+
+
+# Build model with 2013-15 data and test on 2016
+a_prophet <-
+  weekly_injuries_CA %>% 
+  filter(year(week) %in% c(2013:2015)) %>% 
+  select(ds = week, y = injuries) %>% 
+  prophet(yearly.seasonality = TRUE, 
+          seasonality.mode = "additive")
+
+# Forecast 2016 injuries
+a_future <- make_future_dataframe(a_prophet, periods = 52, freq = "week")
+a_forecast <- predict(a_prophet, a_future)
+
+# Plot forecast and trends
+plot(a_prophet, a_forecast)
+prophet_plot_components(a_prophet, a_forecast)
+
+# Test on 2016 data
+a_test <- 
+  a_forecast %>% 
+  select(Date = ds, yhat, yhat_lower, yhat_upper) %>% 
+  filter(year(Date) >= 2016) %>% 
+  mutate(Date = as.character(Date)) %>% 
+  left_join(., weekly_injuries_CA %>% 
+               select(Date = week, injuries) %>% 
+               mutate(Date = as.character(Date))
+             , by = "Date") %>% 
+  mutate(centre_diff = yhat - injuries,
+         upper_diff = yhat_upper - injuries,
+         lower_diff = yhat_lower - injuries) %>% 
+  mutate(Date = as.Date(Date))
+
+summary(a_test)
+
+a_test %>% 
+  select(Date, centre_diff:lower_diff) %>% 
+  gather(diff, amount, -Date) %>% 
+  mutate(diff = factor(diff, levels = c("upper_diff", "centre_diff", "lower_diff"))) %>% 
+  ggplot(aes(Date, amount, group = diff, colour = diff)) +
+  geom_line() +
+  scale_colour_manual(values = c("blue", "black", "blue")) +
+  scale_y_continuous(labels = comma) +
+  labs(title = "Difference between 2016 predicted injuries and actual",
+       subtitle = "Including upper and lower confidence limits",
+       x = "Date",
+       y = "Under / Over resource allocation if prediction followed (n_incidents)") +
+  geom_hline(yintercept = 0)
+
+a_test %>% 
+  ggplot(aes(x = Date, y = centre_diff)) +
+  geom_hline(yintercept = 0, color = "red") +
+  geom_point() +
+  geom_smooth() +
+  scale_y_continuous(labels = comma) +
+  labs(title = "Residuals from first model",
+       subtitle = "Central prediction for 2016 based on 2013-15",
+       x = "Date",
+       y = "Difference from actuals")
+
+# Over cautious on injuries using this model. Too many first aiders hired.
+
+```
+
+```{r prophet_hol}
+# Add holidays (standard US)
+# Build model with 2013-15 data and test on 2016
+
+holidays <-
+  read.csv("us_hols_2013_2016.csv") %>% 
+  select(1:2) %>% 
+  mutate(ds = as_date(ds),
+         lower_window = -2,
+         upper_window = 2)
+
+b_prophet <-
+  weekly_injuries_CA %>% 
+  filter(year(week) %in% c(2013:2015)) %>% 
+  select(ds = week, y = injuries) %>% 
+  prophet(changepoint.prior.scale = 0.3, # increase changepoint sensitivity
+          yearly.seasonality = TRUE, 
+          seasonality.mode = "additive", 
+          holidays = holidays)
+
+# Forecast 2016
+b_future <- make_future_dataframe(b_prophet, periods = 52, freq = "week")
+b_forecast <- predict(b_prophet, b_future)
+
+# Plot forecast and trends
+plot(b_prophet, b_forecast) + add_changepoints_to_plot(b_prophet)
+prophet_plot_components(b_prophet, b_forecast)
+
+# Test forecast on actual 2016 data
+b_test <- 
+  b_forecast %>% 
+  select(Date = ds, yhat, yhat_lower, yhat_upper) %>% 
+  filter(year(Date) >= 2016) %>% 
+  mutate(Date = as.character(Date)) %>% 
+  left_join(., weekly_injuries_CA %>% 
+               select(Date = week, injuries) %>% 
+               mutate(Date = as.character(Date))
+             , by = "Date") %>% 
+  mutate(centre_diff = yhat - injuries,
+         upper_diff = yhat_upper - injuries,
+         lower_diff = yhat_lower - injuries) %>% 
+  mutate(Date = as.Date(Date))
+
+summary(b_test)
+
+b_test %>% 
+  select(Date, centre_diff:lower_diff) %>% 
+  gather(diff, amount, -Date) %>% 
+  mutate(diff = factor(diff, levels = c("upper_diff", "centre_diff", "lower_diff"))) %>% 
+  ggplot(aes(Date, amount, group = diff, colour = diff)) +
+  geom_line() +
+  scale_colour_manual(values = c("blue", "black", "blue")) +
+  scale_y_continuous(labels = comma) +
+  labs(title = "Difference between 2016 predicted injuries and actual",
+       subtitle = "Including upper and lower confidence limits",
+       x = "Date",
+       y = "Under / Over resource allocation if prediction followed (n_incidents)") +
+  geom_hline(yintercept = 0)
+
+b_test %>% 
+  ggplot(aes(x = Date, y = centre_diff)) +
+  geom_hline(yintercept = 0, color = "red") +
+  geom_point() +
+  geom_smooth() +
+  scale_y_continuous(labels = comma) +
+  labs(title = "Residuals from second model",
+       subtitle = "Central prediction for 2016 based on 2013-15",
+       x = "Date",
+       y = "Difference from actuals")
+
+```
+
+```{r}
+# Rerun b_prophet with full data to predict 2017
+c_prophet <-
+  weekly_injuries_CA %>% 
+  select(ds = week, y = injuries) %>% 
+  prophet(changepoint.prior.scale = 0.3, # increase changepoint sensitivity
+          yearly.seasonality = TRUE, 
+          seasonality.mode = "additive", 
+          holidays = holidays)
+
+# Forecast 2018 sales by 2016-17 trend
+c_future <- make_future_dataframe(c_prophet, periods = 52, freq = "week")
+c_forecast <- predict(c_prophet, c_future)
+
+# Plot forecast and trends
+plot(c_prophet, c_forecast) + add_changepoints_to_plot(c_prophet)
+prophet_plot_components(c_prophet, c_forecast)
+
+```
+
