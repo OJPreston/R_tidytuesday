@@ -1,0 +1,92 @@
+---
+title: "Big MTCars"
+author: "Oli Preston"
+date: "14/10/2019"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+
+library(tidyverse)
+library(RColorBrewer)
+library(scales)
+
+big_epa_cars <- readr::read_csv("https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2019/2019-10-15/big_epa_cars.csv")
+
+epa_mtcars <-big_epa_cars %>% 
+  mutate(
+    fuel         = paste0(fuelType1,",",fuelType2),
+    mpg_city     = paste0(city08 ,",",cityA08),
+    mpg_hw       = paste0(highway08 ,",",highwayA08),
+    c02          = paste0(co2,",",co2A),
+    trany        = 
+      gsub("Auto\\(AM-S(\\d+)\\)","Automatic \\1-spd",
+      gsub("4-spd Doubled","4-spd",
+      gsub("(variable gear ratios)","variable_gear_ratios",
+                        trany)),perl=TRUE)
+  ) %>% 
+  separate(trany,c("transmission","gears"),sep=" ") %>% 
+  mutate(gears = gsub("-spd","",gears)) %>% 
+  select(
+    make         = make,
+    model        = model,
+    year         = year,
+    type         = VClass,
+    displacement = displ,
+    transmission,
+    gears,
+    cylinders    = cylinders,
+    drive,
+    fuel,
+    mpg_city,
+    mpg_hw,
+    c02
+  ) %>% 
+  separate_rows(fuel,mpg_city,mpg_hw,c02,sep=",") %>% 
+  filter(fuel     !="NA",
+         mpg_city !=0) %>% 
+  mutate(mpg_city  = as.numeric(mpg_city),
+         mpg_hw    = as.numeric(mpg_hw),
+         c02       = as.numeric(c02),
+         c02       = na_if(c02,-1)) %>% 
+  arrange(make,model,year)
+
+main_manufacturers<-c("Audi", "BMW", "Chevrolet", "Chrysler", "Dodge", 
+                      "Ford", "GMC", "Honda", "Hyundai", "Jeep", 
+                      "Mazda", "Mercedes-Benz", "Mitsubishi", "Nissan",
+                      "Porsche", "Subaru", "Toyota", "Volkswagen", "Volvo")
+
+```
+
+
+```{r}
+# Cumulative number of new cars by fuel type ove time
+epa_mtcars %>% 
+  filter(make %in% main_manufacturers) %>% 
+  count(year, fuel) %>% 
+  group_by(fuel) %>% 
+  mutate(csum = cumsum(n)) %>%
+  ggplot(aes(year, csum, colour = reorder(fuel, -csum))) +
+  geom_line() +
+  theme_minimal() +
+  scale_color_brewer(palette = "Set1") +
+  scale_y_log10(breaks = trans_breaks("log10", function(x) 10^x)) +
+  labs(x = "Year",
+       y = "Cumulative number of models released (log10)",
+       colour = "Fuel type",
+       title = "Cars released over time by fuel type",
+       subtitle = "All models from main vehicle manufacturers*, 1984-2020",
+       caption = "Audi, BMW, Chevrolet, Chrysler, Dodge, Ford, GMC, Honda, Hyundai, Jeep, 
+       Mazda, Mercedes-Benz, Mitsubishi, Nissan, Porsche, Subaru, Toyota, Volkswagen, Volvo")
+
+
+epa_mtcars %>% 
+  filter(make %in% main_manufacturers) %>% 
+  count(year, fuel) %>%
+  ggplot(aes(year, n, colour = reorder(fuel, -n))) +
+  geom_line()
+
+```
+
